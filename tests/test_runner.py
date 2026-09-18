@@ -188,6 +188,30 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(runner.RunError):
             runner.provider_adapter("gemini")
 
+    def test_coordinator_host_roles_and_defaults(self):
+        roles = runner.resolve_roles("hermes")
+        self.assertEqual((roles["planner"], roles["reviewer"], roles["builder"], roles["inspector"]),
+                         ("hermes", "claude", "codex", "claude"))
+        self.assertEqual(runner.resolve_roles("hermes", builder="claude")["inspector"], "codex")
+        self.assertEqual(runner.resolve_roles("hermes", builder="grok")["inspector"], "claude")
+        self.assertEqual(runner.resolve_roles("claude")["reviewer"], "codex")
+
+    def test_coordinator_host_end_to_end_review(self):
+        code, record, path, _ = self.invoke(host="hermes")
+        self.assertEqual(code, 0, record)
+        self.assertEqual(record["provider"], "claude")
+        self.assertEqual(record["roles"]["planner"], "hermes")
+        self.assertEqual(record["plan_sha256"], runner.digest(self.plan.read_bytes()))
+        self.assertEqual(record["response"]["verdict"], "APPROVED")
+
+    def test_coordinator_host_cannot_review_or_build_as_itself(self):
+        # argparse choices reject a coordinator host as provider/builder (SystemExit before run()).
+        with self.assertRaises(SystemExit):
+            self.invoke(host="hermes", extra=("--provider", "hermes"))
+        with self.assertRaises(SystemExit):
+            self.invoke(host="hermes", mode="build",
+                        extra=("--builder", "hermes", "--unreviewed-spec", "--proof", "true"))
+
     def test_both_review_adapters_complete_and_bind_custom_plan(self):
         for host in ("claude", "codex"):
             with self.subTest(host=host):
