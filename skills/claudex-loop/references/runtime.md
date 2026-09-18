@@ -48,4 +48,14 @@ Records contain the plan SHA256, CLI version, requested model/effort, returned s
 
 Live-tested development baseline: Codex CLI **0.153.4** with **GPT-6 Astra**, and Claude Code **2.1.261** with **Fable 5.1**, on Windows. The older npm Codex CLI 0.144.5 exposed the required flags but Astra rejected it with “requires a newer version of Codex.” A version/help probe alone does not establish model compatibility. Verify the selected binary and account; see the repository's validation record for actual live coverage. The automated suite uses fake CLI processes and does not consume model quota. Optional live smoke tests should use disposable fixtures and an explicit model, never a production build.
 
+## Grok (optional third provider)
+
+Live smoke-tested with grok CLI **1.0.34** (`grok-4.6-build`) on macOS, 2026-09-18; see VALIDATION.md. Opt-in only: `--provider grok` or `--builder grok`; defaults never change.
+
+- Review boundary: `--permission-mode plan`, `--tools read,glob,grep`, `--no-subagents`, `--disable-web-search`, and `--json-schema` constrained structured review validated by the shared review validator. This is trust-based like the Codex read-only sandbox: audit grok's own MCP/tool configuration before review, because external side effects are not constrained by permission mode. The adapter deliberately omits `--sandbox` (profiles bind at session creation and must match on resume).
+- Prompt delivery: `--prompt-file` into the run artifacts directory. Grok does not accept a piped-stdin prompt (`Device not configured`); the runner's stdin write is ignored harmlessly.
+- Result parsing: the envelope's `structuredOutput` is authoritative; multi-turn runs concatenate per-turn schema JSON into `text`, and the parser falls back to the last complete JSON object there. `stopReason=end_turn` is required; usage, observed model keys and `total_cost_usd` are recorded (observed smoke cost: ~$0.10 for a six-turn review).
+- Resume: `-r <UUID>` preserves the exact session UUID, matching the runner's resume binding. Timeout kills the process tree as for other providers.
+- Build mode: `--permission-mode acceptEdits` with tools `read,glob,grep,edit,write`; the builder report is the envelope `text`, and the same clean-checkout and proof rules apply.
+
 Primary references: [Claude programmatic usage](https://code.claude.com/docs/en/headless), [Claude CLI](https://code.claude.com/docs/en/cli-reference), [Codex non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode).

@@ -29,6 +29,18 @@ GitHub Actions is configured for Windows, macOS and Linux. Local results establi
 | Fresh Astra inspects Fable's code | APPROVED; new untracked addition.py included in the inspected snapshot |
 | Fresh Fable inspects Astra's code | APPROVED; new untracked addition.py included in the inspected snapshot |
 
+### Grok reviewer smoke (macOS, 2026-09-18, grok CLI 1.0.34, model grok-4.6-build)
+
+First live run through the new `--provider grok` registry adapter, on a disposable fixture repo with a deliberately flawed eviction-plan work order (macOS, Python 3.11):
+
+| Check | Result |
+|---|---|
+| First run (single-turn parser) | Failed at parse: multi-turn runs concatenate per-turn schema JSON in `text` (`Extra data`); final answer lives in `structuredOutput`. Parser was fixed to prefer `structuredOutput` with a last-object fallback; failure surfaced as `status=failed`, never an approval. |
+| Re-run (fixed parser) | `status=completed`; verdict **REVISE** with 6 findings (2 high, 3 medium, 1 low) citing `PLAN.md`/`cache.py` line-level evidence; honest coverage and limitations; 6 turns, 208s, **$0.1034**, session UUID recorded. |
+| Structured review | `--json-schema` constrained output validated by the shared `validate_review()`; duplicated per-turn objects in `text` were correctly ignored in favor of `structuredOutput`. |
+
+Behavior notes recorded from live probes (also in PLAN.md Task 0): stdin-only prompt delivery fails (`Device not configured`); the adapter delivers prompts via `--prompt-file`. `--tools read,glob,grep`, `--no-subagents`, `--disable-web-search`, `--permission-mode plan` accepted in review. Sandbox profiles bind at session creation and must match on resume; the adapter currently omits `--sandbox`. Resume keeps the same session UUID.
+
 Fable runs used Claude Code 2.1.261. The Astra test used an explicit CLI executable path rather than changing the user's global installation. The model selection was explicit in both adapters.
 
 Both delegated builders reported that their proof commands were blocked locally: Claude needed approval in headless mode; Codex's Windows sandbox could not access the Python executable. Neither denial was bypassed. The coordinating host ran the proof independently and observed passing results. A completed build turn is not a verified build; the mandatory host proof step resolved these gaps before final inspection.

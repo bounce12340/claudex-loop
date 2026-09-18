@@ -16,9 +16,11 @@ Identify the actual host from your runtime, not PATH, installed skills, model-na
 | Claude Code | Current Claude session | Codex | Claude | Fresh Codex session |
 | Codex | Current Codex session | Claude | Codex | Fresh Claude session |
 
-Honor `builder=claude|codex`. The inspector is always the other provider. The host remains coordinator even when the other provider builds. To swap the planner, start the conversation in the other host; do not pretend a CLI reviewer is the user's planning conversation.
+Honor `builder=claude|codex|grok`. The inspector is always the other provider. The host remains coordinator even when the other provider builds. To swap the planner, start the conversation in the other host; do not pretend a CLI reviewer is the user's planning conversation.
 
 Model selection is independent of provider roles. Preserve the host's selected model. Review/build CLI calls inherit their own configuration unless `reviewer_model`, `builder_model`, or `inspector_model` is supplied; map these to the runner's `--model` for that invocation. Apply an explicit `*_effort` similarly. Fable 5.1 and GPT-6 Astra are suitable explicit choices, not mandatory pins. A model in the host UI does not prove which model a separate CLI will use. Report requested and observed model information separately; report an unresolved CLI default honestly. Never silently fall back to another model/provider on a failure.
+
+**Additional providers.** The runner keeps a provider registry; `claude` and `codex` remain the defaults in every role table. Grok is available as an explicit opt-in third provider: pass `--provider grok` (plan reviewer) or `--builder grok` (builder). Its reviewer boundary uses plan permission mode plus a read-only tool allowlist (`read,glob,grep`), no subagents, no web tools, and schema-constrained structured review output; build mode uses `acceptEdits` like the other builders. Grok never becomes a default reviewer, inspector, or builder, and there is no automatic provider fallback. See the runtime reference for verified flags and limitations.
 
 Read [the runtime reference](references/runtime.md) before launching a CLI. Resolve its runner relative to this installed SKILL.md, never relative to the project being reviewed. Use absolute paths when launching it.
 

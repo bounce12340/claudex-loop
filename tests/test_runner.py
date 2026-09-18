@@ -71,6 +71,58 @@ else:
 '''
 
 
+FAKE_GROK_CLI = r'''
+import json, os, pathlib, sys, time
+if '--version' in sys.argv:
+    print('fake-grok 1.0')
+    sys.exit(0)
+case = os.environ.get('FAKE_CASE', 'ok')
+if case == 'timeout':
+    time.sleep(30)
+session = '12345678-1234-4567-8123-123456789abc'
+if case == 'wrong_session':
+    session = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+review = {'verdict':'APPROVED', 'summary':'Inspected supplied plan.',
+          'findings':[], 'coverage':['custom plan.md'], 'limitations':[]}
+if case == 'revise':
+    review.update(verdict='REVISE', findings=[{'id':'R1','severity':'high','path':'plan',
+                  'evidence':'Deletion before successful copy loses the only copy.',
+                  'fix':'Verify the new copy before removing the old one.'}])
+if case == 'blocked':
+    review.update(verdict='BLOCKED', coverage=[], limitations=['Required schema unavailable.'])
+if case == 'build':
+    pathlib.Path('built.py').write_text('print(42)\n')
+    text = 'Built; proof passed.'
+elif case == 'malformed':
+    text, structured = 'not json at all', None
+else:
+    text, structured = json.dumps(review), review
+if case == 'multiturn':
+    # Real multi-turn shape: per-turn schema JSON concatenated in text (intermediates first,
+    # final last), and the authoritative result in structuredOutput (absent here to test fallback).
+    text = json.dumps({'verdict': 'BLOCKED', 'summary': 'turn',
+                       'findings': [], 'coverage': ['x'], 'limitations': []}) + json.dumps(review)
+    structured = None
+if case == 'exit':
+    print('Authentication failed', file=sys.stderr)
+    sys.exit(7)
+if case == 'empty':
+    sys.exit(0)
+if case == 'mutate_plan':
+    pathlib.Path(os.environ['FAKE_PLAN']).write_text('Changed after launch')
+if case == 'mutate_code':
+    pathlib.Path('new.py').write_text('changed during inspection')
+if case == 'turn_failed':
+    envelope_text, stop = '', 'max_turns'
+else:
+    envelope_text, stop = text, 'end_turn'
+print(json.dumps({'text': envelope_text, 'structuredOutput': structured,
+                  'stopReason': stop, 'sessionId': session,
+                  'modelUsage': {'grok-test': {'inputTokens': 10}},
+                  'usage': {'input_tokens': 10}, 'total_cost_usd': 0.01,
+                  'num_turns': 2 if case == 'multiturn' else 1}))
+'''
+
 class RunnerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="claudex-test-")
@@ -83,6 +135,8 @@ class RunnerTests(unittest.TestCase):
         self.artifacts = self.root / "runs"
         self.cli = self.root / "fake_cli.py"
         self.cli.write_text(FAKE_CLI)
+        self.grok_cli = self.root / "fake_grok_cli.py"
+        self.grok_cli.write_text(FAKE_GROK_CLI)
         self.git("init", "-q")
         self.git("config", "user.email", "test@example.invalid")
         self.git("config", "user.name", "Test")
@@ -95,12 +149,13 @@ class RunnerTests(unittest.TestCase):
     def git(self, *args):
         return subprocess.check_output(["git", *args], cwd=self.repo, stderr=subprocess.PIPE).decode()
 
-    def invoke(self, host="claude", mode="review", case="ok", extra=()):
+    def invoke(self, host="claude", mode="review", case="ok", extra=(), fake="claude"):
         args = [mode, "--host", host, "--repo", str(self.repo), "--plan", str(self.plan),
                 "--artifacts", str(self.artifacts), *extra]
         old = set(self.artifacts.glob("*/result.json")) if self.artifacts.exists() else set()
         output, error = io.StringIO(), io.StringIO()
-        with patch.object(runner, "cli_prefix", return_value=[sys.executable, str(self.cli)]), \
+        fake_path = self.grok_cli if fake == "grok" else self.cli
+        with patch.object(runner, "cli_prefix", return_value=[sys.executable, str(fake_path)]), \
              patch.dict(os.environ, {"FAKE_CASE": case, "FAKE_PLAN": str(self.plan)}), \
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
             code = runner.main(args)
@@ -115,6 +170,23 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual((roles["planner"], roles["builder"], roles["inspector"]), ("codex", "claude", "codex"))
         with self.assertRaises(runner.RunError):
             runner.resolve_roles("codex", "codex")
+
+    def test_three_provider_roles_grok_optin_and_defaults_unchanged(self):
+        self.assertEqual(runner.resolve_roles("claude", reviewer="grok")["reviewer"], "grok")
+        roles = runner.resolve_roles("claude", builder="grok")
+        self.assertEqual((roles["builder"], roles["inspector"]), ("grok", "claude"))
+        roles = runner.resolve_roles("codex", builder="grok")
+        self.assertEqual(roles["inspector"], "claude")
+        with self.assertRaises(runner.RunError):
+            runner.resolve_roles("grok", reviewer="grok")
+        self.assertEqual(runner.resolve_roles("claude")["reviewer"], "codex")
+
+    def test_registry_dispatch_and_unknown_provider(self):
+        self.assertEqual(runner.command("grok", "review", self.root)[0], "--prompt-file")
+        self.assertEqual(runner.command("claude", "review", self.root)[0], "-p")
+        self.assertEqual(runner.command("codex", "review", self.root)[0], "exec")
+        with self.assertRaises(runner.RunError):
+            runner.provider_adapter("gemini")
 
     def test_both_review_adapters_complete_and_bind_custom_plan(self):
         for host in ("claude", "codex"):
@@ -286,6 +358,69 @@ class RunnerTests(unittest.TestCase):
         code, _, _, error = self.invoke(extra=("--artifacts", str(self.repo / "runs")))
         self.assertEqual(code, 1)
         self.assertIn("outside", error)
+
+    def test_grok_review_flags_plan_mode_and_schema(self):
+        args = runner.command("grok", "review", self.root)
+        self.assertEqual(args[args.index("--permission-mode") + 1], "plan")
+        self.assertIn("--json-schema", args)
+        self.assertEqual(json.loads(args[args.index("--json-schema") + 1]), runner.REVIEW_SCHEMA)
+        self.assertIn("--no-subagents", args)
+        self.assertIn("--disable-web-search", args)
+        self.assertEqual(args[args.index("--tools") + 1], "read,glob,grep")
+        self.assertNotIn("--sandbox", args)
+
+    def test_grok_review_completes_and_binds_plan(self):
+        code, record, path, _ = self.invoke(fake="grok", extra=("--provider", "grok"))
+        self.assertEqual(code, 0, record)
+        self.assertEqual(record["session_id"], SESSION)
+        self.assertEqual(record["provider"], "grok")
+        self.assertEqual(record["plan_sha256"], runner.digest(self.plan.read_bytes()))
+        self.assertEqual(record["response"]["verdict"], "APPROVED")
+        self.assertEqual(record["observed_models"], ["grok-test"])
+        self.assertEqual(record["total_cost_usd"], 0.01)
+        prompt = (path.parent / "prompt.txt").read_text()
+        self.assertIn(str(self.plan), prompt)
+
+    def test_grok_review_failures_never_approve(self):
+        for case in ("exit", "empty", "malformed", "turn_failed"):
+            with self.subTest(case=case):
+                code, record, path, _ = self.invoke(fake="grok", case=case, extra=("--provider", "grok"))
+                self.assertEqual(code, 1)
+                self.assertEqual(record["status"], "failed")
+                self.assertTrue((path.parent / "stderr.txt").exists())
+                if case == "exit":
+                    self.assertIn("Authentication failed", (path.parent / "stderr.txt").read_text())
+
+    def test_grok_revise_and_blocked_complete_but_are_not_approval(self):
+        for case in ("revise", "blocked"):
+            code, record, _, _ = self.invoke(fake="grok", case=case, extra=("--provider", "grok"))
+            self.assertEqual(code, 0)
+            with self.assertRaises(runner.RunError):
+                runner.check_approval(record, self.plan, self.repo)
+
+    def test_grok_resume_keeps_same_session(self):
+        _, _, previous, _ = self.invoke(fake="grok", case="revise", extra=("--provider", "grok"))
+        self.plan.write_text("New revision")
+        code, record, _, _ = self.invoke(fake="grok", extra=("--provider", "grok", "--resume", str(previous)))
+        self.assertEqual(code, 0, record)
+        self.assertEqual(record["session_id"], SESSION)
+        args = runner.command("grok", "review", self.root, session=SESSION)
+        self.assertIn("--resume", args)
+        self.assertIn(SESSION, args)
+
+    def test_grok_multiturn_concatenated_text_falls_back_to_last_object(self):
+        code, record, _, _ = self.invoke(fake="grok", case="multiturn", extra=("--provider", "grok"))
+        self.assertEqual(code, 0, record)
+        self.assertEqual(record["response"]["verdict"], "APPROVED")
+        self.assertEqual(record["num_turns"], 2)
+
+    def test_grok_inspector_role_forbidden_when_builder_is_grok(self):
+        roles = runner.resolve_roles("claude", builder="grok")
+        self.assertEqual(roles["inspector"], "claude")
+        code, _, _, error = self.invoke(mode="inspect",
+                                        extra=("--base", self.base, "--builder", "grok", "--provider", "grok"))
+        self.assertEqual(code, 1)
+        self.assertIn("opposite the builder", error)
 
 
 if __name__ == "__main__":

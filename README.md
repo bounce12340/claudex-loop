@@ -15,6 +15,7 @@ This repository contains separate skills for choosing a model, making a one-off 
 | [`claudex-loop`](skills/claudex-loop/SKILL.md) | Requirements, plan review, implementation, and final inspection | Both CLIs and Python 3.10+ |
 | [`codex-review`](skills/codex-review/SKILL.md) | Explicit Codex plan-review compatibility command | Shared `claudex-loop` skill |
 | [`codex-build`](skills/codex-build/SKILL.md) | Explicit Codex builder compatibility command | Shared `claudex-loop` skill |
+| **Grok** (`--provider grok` / `--builder grok`) | Optional third provider for reviewer/builder/inspector roles via the registry | Grok Build CLI on PATH; no npm shim required |
 
 ## Claudex Loop
 
