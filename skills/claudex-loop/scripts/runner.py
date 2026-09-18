@@ -16,7 +16,16 @@ import time
 import uuid
 
 
-PROVIDERS = ("claude", "codex")
+PROVIDER_ADAPTERS: dict[str, dict] = {}
+
+
+def provider_adapter(provider: str) -> dict:
+    """One adapter per agent CLI: command builder + result parser (+ npm entry for Windows shims)."""
+    if provider not in PROVIDER_ADAPTERS:
+        raise RunError(f"Unknown provider: {provider}. Known: {sorted(PROVIDER_ADAPTERS)}.")
+    return PROVIDER_ADAPTERS[provider]
+
+
 REVIEW_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
@@ -49,12 +58,17 @@ def save(path: Path, value) -> None:
 
 def resolve_roles(host: str, reviewer: str | None = None,
                   builder: str | None = None) -> dict:
-    reviewer = reviewer or next(p for p in PROVIDERS if p != host)
+    reviewer = reviewer or other_provider(host)
     if reviewer == host:
         raise RunError("The plan reviewer must be the other provider. Change the host to swap roles.")
     builder = builder or host
     return {"host": host, "planner": host, "reviewer": reviewer,
-            "builder": builder, "inspector": next(p for p in PROVIDERS if p != builder)}
+            "builder": builder, "inspector": other_provider(builder)}
+
+
+def other_provider(exclude: str) -> str:
+    """First registered provider that is not the excluded one (registry order = default order)."""
+    return next(p for p in PROVIDERS if p != exclude)
 
 
 def cli_prefix(provider: str, override: str | None = None) -> list[str]:
@@ -66,9 +80,7 @@ def cli_prefix(provider: str, override: str | None = None) -> list[str]:
         raise RunError(f"{provider} is not on PATH. Install and authenticate its CLI first.")
     path = Path(executable)
     if os.name == "nt" and path.suffix.lower() in (".cmd", ".bat", ".ps1"):
-        entry = path.parent / "node_modules" / (
-            "@openai/codex/bin/codex.js" if provider == "codex"
-            else "@anthropic-ai/claude-code/cli.js")
+        entry = path.parent / "node_modules" / provider_adapter(provider)["npm_entry"]
         node = shutil.which("node")
         if node and entry.is_file():
             return [node, str(entry)]
@@ -142,22 +154,26 @@ def validate_review(value) -> dict:
     return value
 
 
-def command(provider: str, mode: str, run_dir: Path, model=None, effort=None,
-            session=None) -> list[str]:
+def codex_command(provider: str, mode: str, run_dir: Path, model=None, effort=None,
+                  session=None) -> list[str]:
     review = mode != "build"
-    if provider == "codex":
-        args = ["exec"] + (["resume", session] if session else [])
-        args += (["-c", 'sandbox_mode="read-only"'] if session and review else
-                 ["-c", 'sandbox_mode="workspace-write"'] if session else
-                 ["-s", "read-only" if review else "workspace-write"])
-        args += ["-c", 'approval_policy="never"', "--json", "-o", str(run_dir / "reply.txt")]
-        if review:
-            args += ["--skip-git-repo-check", "--output-schema", str(run_dir / "schema.json")]
-        if model:
-            args += ["-m", model]
-        if effort:
-            args += ["-c", f'model_reasoning_effort="{effort}"']
-        return args + ["-"]
+    args = ["exec"] + (["resume", session] if session else [])
+    args += (["-c", 'sandbox_mode="read-only"'] if session and review else
+             ["-c", 'sandbox_mode="workspace-write"'] if session else
+             ["-s", "read-only" if review else "workspace-write"])
+    args += ["-c", 'approval_policy="never"', "--json", "-o", str(run_dir / "reply.txt")]
+    if review:
+        args += ["--skip-git-repo-check", "--output-schema", str(run_dir / "schema.json")]
+    if model:
+        args += ["-m", model]
+    if effort:
+        args += ["-c", f'model_reasoning_effort="{effort}"']
+    return args + ["-"]
+
+
+def claude_command(provider: str, mode: str, run_dir: Path, model=None, effort=None,
+                   session=None) -> list[str]:
+    review = mode != "build"
     args = ["-p", "--output-format", "json", "--permission-prompts", "none"]
     if review:
         args += ["--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
@@ -175,6 +191,11 @@ def command(provider: str, mode: str, run_dir: Path, model=None, effort=None,
     if effort:
         args += ["--effort", effort]
     return args
+
+
+def command(provider: str, mode: str, run_dir: Path, model=None, effort=None,
+            session=None) -> list[str]:
+    return provider_adapter(provider)["command"](provider, mode, run_dir, model, effort, session)
 
 
 def execute(argv: list[str], prompt: str, repo: Path, run_dir: Path, timeout: int) -> int:
@@ -197,40 +218,48 @@ def execute(argv: list[str], prompt: str, repo: Path, run_dir: Path, timeout: in
             return proc.returncode
 
 
-def parse_result(provider: str, mode: str, run_dir: Path, expected_session=None) -> dict:
+def codex_parse_result(provider: str, mode: str, run_dir: Path) -> tuple:
     stdout = (run_dir / "stdout.txt").read_text(encoding="utf-8", errors="replace")
-    if provider == "codex":
-        events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
-        if any(not isinstance(e, dict) for e in events):
-            raise RunError("Codex event stream contains a non-object event.")
-        if any(e.get("type") in ("error", "turn.failed") for e in events):
-            raise RunError("Codex reported a failed turn; inspect the captured diagnostics.")
-        started = [e["thread_id"] for e in events if e.get("type") == "thread.started"]
-        completed = [e for e in events if e.get("type") == "turn.completed"]
-        if len(started) != 1 or len(completed) != 1:
-            raise RunError("Missing or ambiguous Codex session/completion event.")
-        session = started[0]
-        text = (run_dir / "reply.txt").read_text(encoding="utf-8")
-        value = json.loads(text) if mode != "build" else text
-        metadata = {"usage": completed[0].get("usage"), "observed_models": []}
-    else:
-        envelope = json.loads(stdout)
-        # Some CLI versions emit an array of init/assistant/result events for JSON.
-        if isinstance(envelope, list):
-            results = [e for e in envelope if isinstance(e, dict) and e.get("type") == "result"]
-            if len(results) != 1:
-                raise RunError("Missing or ambiguous Claude result event.")
-            envelope = results[0]
-        if not isinstance(envelope, dict):
-            raise RunError("Claude response is not a result object.")
-        if envelope.get("type") != "result" or envelope.get("is_error") or envelope.get("subtype") != "success":
-            raise RunError("Claude did not finish successfully; inspect the captured diagnostics.")
-        session = envelope.get("session_id")
-        value = envelope.get("structured_output") if mode != "build" else envelope.get("result")
-        metadata = {"usage": envelope.get("usage"),
-                    "observed_models": list(envelope.get("modelUsage", {})),
-                    "permission_denials": envelope.get("permission_denials", []),
-                    "total_cost_usd": envelope.get("total_cost_usd")}
+    events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    if any(not isinstance(e, dict) for e in events):
+        raise RunError("Codex event stream contains a non-object event.")
+    if any(e.get("type") in ("error", "turn.failed") for e in events):
+        raise RunError("Codex reported a failed turn; inspect the captured diagnostics.")
+    started = [e["thread_id"] for e in events if e.get("type") == "thread.started"]
+    completed = [e for e in events if e.get("type") == "turn.completed"]
+    if len(started) != 1 or len(completed) != 1:
+        raise RunError("Missing or ambiguous Codex session/completion event.")
+    session = started[0]
+    text = (run_dir / "reply.txt").read_text(encoding="utf-8")
+    value = json.loads(text) if mode != "build" else text
+    metadata = {"usage": completed[0].get("usage"), "observed_models": []}
+    return session, value, metadata
+
+
+def claude_parse_result(provider: str, mode: str, run_dir: Path) -> tuple:
+    stdout = (run_dir / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+    envelope = json.loads(stdout)
+    # Some CLI versions emit an array of init/assistant/result events for JSON.
+    if isinstance(envelope, list):
+        results = [e for e in envelope if isinstance(e, dict) and e.get("type") == "result"]
+        if len(results) != 1:
+            raise RunError("Missing or ambiguous Claude result event.")
+        envelope = results[0]
+    if not isinstance(envelope, dict):
+        raise RunError("Claude response is not a result object.")
+    if envelope.get("type") != "result" or envelope.get("is_error") or envelope.get("subtype") != "success":
+        raise RunError("Claude did not finish successfully; inspect the captured diagnostics.")
+    session = envelope.get("session_id")
+    value = envelope.get("structured_output") if mode != "build" else envelope.get("result")
+    metadata = {"usage": envelope.get("usage"),
+                "observed_models": list(envelope.get("modelUsage", {})),
+                "permission_denials": envelope.get("permission_denials", []),
+                "total_cost_usd": envelope.get("total_cost_usd")}
+    return session, value, metadata
+
+
+def parse_result(provider: str, mode: str, run_dir: Path, expected_session=None) -> dict:
+    session, value, metadata = provider_adapter(provider)["parse"](provider, mode, run_dir)
     try:
         uuid.UUID(session)
     except (ValueError, TypeError, AttributeError) as exc:
@@ -242,6 +271,84 @@ def parse_result(provider: str, mode: str, run_dir: Path, expected_session=None)
     elif not isinstance(value, str) or not value.strip():
         raise RunError("Build report is empty.")
     return {"session_id": session, "response": value, **metadata}
+
+
+def grok_command(provider: str, mode: str, run_dir: Path, model=None, effort=None,
+                 session=None) -> list[str]:
+    """Grok Build CLI. Prompt arrives via --prompt-file (stdin pipe fails: os error 6).
+    Review boundary: plan permission mode + read-only tools; no sandbox flag (profiles
+    bind at session creation and must match on resume)."""
+    review = mode != "build"
+    args = ["--prompt-file", str(run_dir / "prompt.txt"), "--output-format", "json",
+            "--no-subagents", "--disable-web-search",
+            "--tools", "read,glob,grep" if review else "read,glob,grep,edit,write",
+            "--permission-mode", "plan" if review else "acceptEdits"]
+    if review:
+        args += ["--json-schema", json.dumps(REVIEW_SCHEMA, separators=(",", ":"))]
+    if session:
+        args += ["--resume", session]
+    if model:
+        args += ["-m", model]
+    if effort:
+        args += ["--effort", effort]
+    return args
+
+
+def _grok_text_value(text):
+    """Fallback when structuredOutput is absent: text should be one JSON object, but
+    multi-turn runs may concatenate per-turn schema objects — take the last one."""
+    if not isinstance(text, str) or not text.strip():
+        raise RunError("Grok returned no response text.")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        if "Extra data" not in str(exc):
+            raise RunError("Grok response text is not valid JSON.") from exc
+    decoder, idx, last = json.JSONDecoder(), 0, None
+    while idx < len(text):
+        while idx < len(text) and text[idx] in " \n\r\t":
+            idx += 1
+        if idx >= len(text):
+            break
+        try:
+            last, idx = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError as exc:
+            raise RunError("Grok response text is not valid JSON.") from exc
+    if last is None:
+        raise RunError("Grok returned no parseable review JSON.")
+    return last
+
+
+def grok_parse_result(provider: str, mode: str, run_dir: Path) -> tuple:
+    stdout = (run_dir / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+    envelope = json.loads(stdout)
+    if not isinstance(envelope, dict):
+        raise RunError("Grok response is not a result object.")
+    if envelope.get("stopReason") != "end_turn":
+        raise RunError("Grok did not finish successfully; inspect the captured diagnostics.")
+    session = envelope.get("sessionId")
+    structured = envelope.get("structuredOutput")
+    if mode != "build":
+        value = structured if isinstance(structured, dict) else _grok_text_value(envelope.get("text"))
+    else:
+        value = envelope.get("text")
+        if not isinstance(value, str) or not value.strip():
+            raise RunError("Grok returned no response text.")
+    metadata = {"usage": envelope.get("usage"),
+                "observed_models": list(envelope.get("modelUsage", {})),
+                "total_cost_usd": envelope.get("total_cost_usd"),
+                "num_turns": envelope.get("num_turns")}
+    return session, value, metadata
+
+
+PROVIDER_ADAPTERS.update({
+    "claude": {"command": claude_command, "parse": claude_parse_result,
+               "npm_entry": "@anthropic-ai/claude-code/cli.js"},
+    "codex": {"command": codex_command, "parse": codex_parse_result,
+              "npm_entry": "@openai/codex/bin/codex.js"},
+    "grok": {"command": grok_command, "parse": grok_parse_result},
+})
+PROVIDERS = tuple(PROVIDER_ADAPTERS)
 
 
 def check_approval(record: dict, plan: Path, repo: Path) -> None:
