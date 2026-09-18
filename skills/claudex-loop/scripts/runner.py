@@ -61,6 +61,9 @@ COORDINATOR_HOSTS = ("hermes",)
 
 def resolve_roles(host: str, reviewer: str | None = None,
                   builder: str | None = None) -> dict:
+    if host not in PROVIDERS + COORDINATOR_HOSTS:
+        raise RunError(f"Unknown host: {host}. Providers: {sorted(PROVIDERS)}; "
+                       f"coordinator hosts: {sorted(COORDINATOR_HOSTS)}.")
     reviewer = reviewer or other_provider(host)
     if reviewer == host:
         raise RunError("The plan reviewer must be the other provider. Change the host to swap roles.")
@@ -388,10 +391,28 @@ def run(args) -> int:
     roles = resolve_roles(args.host, builder=args.builder)
     provider = args.provider or (roles["builder"] if args.mode == "build" else
                                  roles["inspector"] if args.mode == "inspect" else roles["reviewer"])
+    # Reconcile roles with the effective provider before guarding, so guards compare
+    # against who actually runs rather than the default assignment.
+    if args.mode == "review":
+        roles["reviewer"] = provider
+        if args.host in COORDINATOR_HOSTS and not args.builder:
+            roles["builder"] = other_provider(provider)
+            roles["inspector"] = other_provider(roles["builder"])
+    elif args.mode == "build":
+        roles["builder"] = provider
+        roles["inspector"] = other_provider(provider)
+    else:
+        roles["inspector"] = provider
+        if args.host in COORDINATOR_HOSTS and not args.builder:
+            # Coordinator inspect default: builder is the first provider that is not
+            # the inspector, so a bare `inspect --provider codex` stays self-consistent.
+            roles["builder"] = other_provider(provider)
     if args.mode == "review" and provider == args.host:
         raise RunError("Plan review must use the provider opposite the planner/host.")
     if args.mode == "inspect" and provider == roles["builder"]:
         raise RunError("Inspection must use the provider opposite the builder.")
+    if args.mode == "build" and args.provider and args.builder and args.provider != args.builder:
+        raise RunError("--provider and --builder select different builders; keep them consistent.")
     if args.mode == "check":
         if not args.approval:
             raise RunError("check requires --approval result.json.")
