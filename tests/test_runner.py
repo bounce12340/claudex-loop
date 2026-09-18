@@ -206,11 +206,53 @@ class RunnerTests(unittest.TestCase):
 
     def test_coordinator_host_cannot_review_or_build_as_itself(self):
         # argparse choices reject a coordinator host as provider/builder (SystemExit before run()).
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit) as cm:
             self.invoke(host="hermes", extra=("--provider", "hermes"))
+        self.assertEqual(cm.exception.code, 2)
         with self.assertRaises(SystemExit):
             self.invoke(host="hermes", mode="build",
                         extra=("--builder", "hermes", "--unreviewed-spec", "--proof", "true"))
+
+    def test_coordinator_review_provider_override_reconciles_roles(self):
+        # COORD-001: roles recorded for a review run must reflect the effective reviewer.
+        code, record, _, _ = self.invoke(host="hermes", extra=("--provider", "codex"))
+        self.assertEqual(code, 0, record)
+        self.assertEqual(record["provider"], "codex")
+        self.assertEqual(record["roles"]["reviewer"], "codex")
+        self.assertEqual(record["roles"]["builder"], "claude")
+        self.assertEqual(record["roles"]["inspector"], "codex")
+
+    def test_coordinator_conflicting_build_selections_rejected(self):
+        # COORD-002 guard: --provider and --builder must agree when both are given.
+        code, _, _, error = self.invoke(host="hermes", mode="build",
+                                        extra=("--builder", "claude", "--provider", "codex",
+                                               "--unreviewed-spec", "--proof", "true"))
+        self.assertEqual(code, 1)
+        self.assertIn("different builders", error)
+
+    def test_coordinator_build_and_inspect_roundtrip(self):
+        extra = ("--builder", "claude", "--unreviewed-spec", "--proof", "python -m unittest")
+        code, build_record, _, _ = self.invoke(host="hermes", mode="build", case="build", extra=extra)
+        self.assertEqual(code, 0, build_record)
+        self.assertEqual(build_record["provider"], "claude")
+        self.assertEqual(build_record["roles"]["builder"], "claude")
+        self.assertEqual(build_record["roles"]["inspector"], "codex")
+        # The inspect handoff carries the builder identity, as the skill's loop does.
+        code, inspect_record, _, _ = self.invoke(host="hermes", mode="inspect", case="ok",
+                                                 extra=("--base", self.base, "--builder", "claude"))
+        self.assertEqual(code, 0, inspect_record)
+        self.assertEqual(inspect_record["provider"], "codex")
+        self.assertEqual(inspect_record["roles"]["inspector"], "codex")
+        self.assertEqual(inspect_record["roles"]["builder"], "claude")
+        self.assertEqual(build_record["snapshot"]["sha256"], inspect_record["snapshot"]["sha256"])
+
+    def test_coordinator_inspect_rejects_same_as_default_builder(self):
+        # HERMES-001 regression: a bare coordinator inspect whose provider equals the
+        # default builder must fail, never reassign authorship to make the guard pass.
+        code, _, _, error = self.invoke(host="hermes", mode="inspect", case="ok",
+                                        extra=("--base", self.base, "--provider", "codex"))
+        self.assertEqual(code, 1)
+        self.assertIn("opposite the builder", error)
 
     def test_both_review_adapters_complete_and_bind_custom_plan(self):
         for host in ("claude", "codex"):
