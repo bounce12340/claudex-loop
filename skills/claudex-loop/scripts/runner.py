@@ -403,10 +403,6 @@ def run(args) -> int:
         roles["inspector"] = other_provider(provider)
     else:
         roles["inspector"] = provider
-        if args.host in COORDINATOR_HOSTS and not args.builder:
-            # Coordinator inspect default: builder is the first provider that is not
-            # the inspector, so a bare `inspect --provider codex` stays self-consistent.
-            roles["builder"] = other_provider(provider)
     if args.mode == "review" and provider == args.host:
         raise RunError("Plan review must use the provider opposite the planner/host.")
     if args.mode == "inspect" and provider == roles["builder"]:

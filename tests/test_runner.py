@@ -246,13 +246,13 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(inspect_record["roles"]["builder"], "claude")
         self.assertEqual(build_record["snapshot"]["sha256"], inspect_record["snapshot"]["sha256"])
 
-    def test_coordinator_bare_inspect_default_is_self_consistent(self):
-        code, record, _, _ = self.invoke(host="hermes", mode="inspect", case="ok",
-                                         extra=("--base", self.base, "--provider", "codex"))
-        self.assertEqual(code, 0, record)
-        self.assertEqual(record["provider"], "codex")
-        self.assertEqual(record["roles"]["builder"], "claude")
-        self.assertEqual(record["roles"]["inspector"], "codex")
+    def test_coordinator_inspect_rejects_same_as_default_builder(self):
+        # HERMES-001 regression: a bare coordinator inspect whose provider equals the
+        # default builder must fail, never reassign authorship to make the guard pass.
+        code, _, _, error = self.invoke(host="hermes", mode="inspect", case="ok",
+                                        extra=("--base", self.base, "--provider", "codex"))
+        self.assertEqual(code, 1)
+        self.assertIn("opposite the builder", error)
 
     def test_both_review_adapters_complete_and_bind_custom_plan(self):
         for host in ("claude", "codex"):
