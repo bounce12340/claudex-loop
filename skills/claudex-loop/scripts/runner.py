@@ -56,12 +56,17 @@ def save(path: Path, value) -> None:
     path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+COORDINATOR_HOSTS = ("hermes",)
+
+
 def resolve_roles(host: str, reviewer: str | None = None,
                   builder: str | None = None) -> dict:
     reviewer = reviewer or other_provider(host)
     if reviewer == host:
         raise RunError("The plan reviewer must be the other provider. Change the host to swap roles.")
-    builder = builder or host
+    # A provider host builds by default; a coordinator host (e.g. hermes) has no CLI
+    # of its own, so the default builder is the first provider that is not the reviewer.
+    builder = builder or (host if host in PROVIDERS else other_provider(reviewer))
     return {"host": host, "planner": host, "reviewer": reviewer,
             "builder": builder, "inspector": other_provider(builder)}
 
@@ -493,8 +498,8 @@ def run(args) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("roles", "review", "build", "inspect", "check"))
-    parser.add_argument("--host", required=True, choices=PROVIDERS,
-                        help="Actual host of the user conversation; do not infer from installed binaries.")
+    parser.add_argument("--host", required=True, choices=PROVIDERS + COORDINATOR_HOSTS,
+                        help="Actual host of the user conversation; a coordinator agent (e.g. hermes) plans and arbitrates but never runs as a CLI provider.")
     parser.add_argument("--builder", choices=PROVIDERS)
     parser.add_argument("--provider", choices=PROVIDERS)
     parser.add_argument("--repo", default=".")
